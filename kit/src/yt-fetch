@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Fetch YouTube comments for analysis (no Google API key required).
+
+Installed by the yt-comment-analyzer sandbox kit. Prints the video title and
+its most-popular comments so the agent can analyze them. Use --json for a
+machine-readable dump.
+
+Usage:
+  yt-fetch <youtube-url> [--limit N] [--json]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.request
+
+# youtube-comment-downloader parses relative timestamps via dateparser, which
+# calls tzlocal(). Some sandboxes preset TZ to a non-zoneinfo value (e.g. "EDT4")
+# that makes tzlocal raise. Valid zoneinfo names contain a "/" (e.g. "Etc/UTC",
+# "America/New_York"); if TZ isn't one, force UTC. (We don't use the timestamps.)
+if "/" not in os.environ.get("TZ", ""):
+    os.environ["TZ"] = "Etc/UTC"
+
+from youtube_comment_downloader import YoutubeCommentDownloader, SORT_BY_POPULAR
+
+_VIDEO_ID_RE = re.compile(r"(?:v=|/shorts/|/embed/|youtu\.be/|/live/)([0-9A-Za-z_-]{11})")
+
+
+def extract_video_id(url: str) -> str | None:
+    match = _VIDEO_ID_RE.search(url)
+    if match:
+        return match.group(1)
+    if re.fullmatch(r"[0-9A-Za-z_-]{11}", url.strip()):
+        return url.strip()
+    return None
+
+
+def fetch_title(video_id: str) -> str:
+    oembed = (
+        "https://www.youtube.com/oembed?format=json&url="
+        f"https://www.youtube.com/watch?v={video_id}"
+    )
+    try:
+        req = urllib.request.Request(oembed, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.load(resp).get("title", "").strip() or "Untitled video"
+    except Exception:
+        return "Untitled video"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Fetch YouTube comments for analysis.")
+    parser.add_argument("url", help="YouTube video URL or 11-char video ID")
+    parser.add_argument("--limit", type=int, default=300, help="Max comments (default 300)")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    args = parser.parse_args()
+
+    video_id = extract_video_id(args.url)
+    if not video_id:
+        print(f"error: could not find a YouTube video ID in {args.url!r}", file=sys.stderr)
+        return 2
+
+    canonical = f"https://www.youtube.com/watch?v={video_id}"
+    title = fetch_title(video_id)
+    limit = max(1, min(args.limit, 1000))
+
+    downloader = YoutubeCommentDownloader()
+    comments = []
+    try:
+        for raw in downloader.get_comments_from_url(canonical, sort_by=SORT_BY_POPULAR):
+            text = (raw.get("text") or "").strip()
+            if not text:
+                continue
+            comments.append(
+                {
+                    "text": text,
+                    "author": (raw.get("author") or "").strip(),
+                    "votes": str(raw.get("votes") or "0"),
+                }
+            )
+            if len(comments) >= limit:
+                break
+    except Exception as exc:
+        print(
+            f"error: failed to fetch comments ({type(exc).__name__}: {exc}). "
+            "YouTube may be rate-limiting scraping; try again or lower --limit.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not comments:
+        print(
+            "error: no comments returned (comments may be disabled, or YouTube is "
+            "rate-limiting scraping right now).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.json:
+        json.dump(
+            {"title": title, "url": canonical, "count": len(comments), "comments": comments},
+            sys.stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        print()
+        return 0
+
+    print(f"Title: {title}")
+    print(f"URL: {canonical}")
+    print(f"Comments fetched: {len(comments)} (sorted by popularity)")
+    print()
+    print("Comments (format: [#] (↑votes) author: text):")
+    print()
+    for i, c in enumerate(comments, 1):
+        author = f" {c['author']}" if c["author"] else ""
+        print(f"[{i}] (↑{c['votes']}){author}: {c['text']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

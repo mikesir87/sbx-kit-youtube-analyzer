@@ -1,0 +1,214 @@
+# GENERATED FILE — do not edit by hand.
+# Edit src/yt-fetch or src/SKILL.md and run `python3 build.py` to regenerate.
+schemaVersion: '1'
+kind: mixin
+name: yt-comment-analyzer
+displayName: YouTube Comment Analyzer
+description: Installs a yt-fetch tool and a Claude Code skill for analyzing the comments on a YouTube video (typically a Docker product video) — what stood out, product & blog ideas, and pain points. No API key required; the agent does the analysis itself.
+network:
+  allowedDomains:
+  - www.youtube.com
+  - youtube.com
+  - pypi.org
+  - files.pythonhosted.org
+commands:
+  initFiles:
+  - path: /home/agent/.local/bin/yt-fetch
+    mode: '0755'
+    content: |
+      #!/usr/bin/env python3
+      """Fetch YouTube comments for analysis (no Google API key required).
+
+      Installed by the yt-comment-analyzer sandbox kit. Prints the video title and
+      its most-popular comments so the agent can analyze them. Use --json for a
+      machine-readable dump.
+
+      Usage:
+        yt-fetch <youtube-url> [--limit N] [--json]
+      """
+
+      from __future__ import annotations
+
+      import argparse
+      import json
+      import os
+      import re
+      import sys
+      import urllib.request
+
+      # youtube-comment-downloader parses relative timestamps via dateparser, which
+      # calls tzlocal(). Some sandboxes preset TZ to a non-zoneinfo value (e.g. "EDT4")
+      # that makes tzlocal raise. Valid zoneinfo names contain a "/" (e.g. "Etc/UTC",
+      # "America/New_York"); if TZ isn't one, force UTC. (We don't use the timestamps.)
+      if "/" not in os.environ.get("TZ", ""):
+          os.environ["TZ"] = "Etc/UTC"
+
+      from youtube_comment_downloader import YoutubeCommentDownloader, SORT_BY_POPULAR
+
+      _VIDEO_ID_RE = re.compile(r"(?:v=|/shorts/|/embed/|youtu\.be/|/live/)([0-9A-Za-z_-]{11})")
+
+
+      def extract_video_id(url: str) -> str | None:
+          match = _VIDEO_ID_RE.search(url)
+          if match:
+              return match.group(1)
+          if re.fullmatch(r"[0-9A-Za-z_-]{11}", url.strip()):
+              return url.strip()
+          return None
+
+
+      def fetch_title(video_id: str) -> str:
+          oembed = (
+              "https://www.youtube.com/oembed?format=json&url="
+              f"https://www.youtube.com/watch?v={video_id}"
+          )
+          try:
+              req = urllib.request.Request(oembed, headers={"User-Agent": "Mozilla/5.0"})
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  return json.load(resp).get("title", "").strip() or "Untitled video"
+          except Exception:
+              return "Untitled video"
+
+
+      def main() -> int:
+          parser = argparse.ArgumentParser(description="Fetch YouTube comments for analysis.")
+          parser.add_argument("url", help="YouTube video URL or 11-char video ID")
+          parser.add_argument("--limit", type=int, default=300, help="Max comments (default 300)")
+          parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+          args = parser.parse_args()
+
+          video_id = extract_video_id(args.url)
+          if not video_id:
+              print(f"error: could not find a YouTube video ID in {args.url!r}", file=sys.stderr)
+              return 2
+
+          canonical = f"https://www.youtube.com/watch?v={video_id}"
+          title = fetch_title(video_id)
+          limit = max(1, min(args.limit, 1000))
+
+          downloader = YoutubeCommentDownloader()
+          comments = []
+          try:
+              for raw in downloader.get_comments_from_url(canonical, sort_by=SORT_BY_POPULAR):
+                  text = (raw.get("text") or "").strip()
+                  if not text:
+                      continue
+                  comments.append(
+                      {
+                          "text": text,
+                          "author": (raw.get("author") or "").strip(),
+                          "votes": str(raw.get("votes") or "0"),
+                      }
+                  )
+                  if len(comments) >= limit:
+                      break
+          except Exception as exc:
+              print(
+                  f"error: failed to fetch comments ({type(exc).__name__}: {exc}). "
+                  "YouTube may be rate-limiting scraping; try again or lower --limit.",
+                  file=sys.stderr,
+              )
+              return 1
+
+          if not comments:
+              print(
+                  "error: no comments returned (comments may be disabled, or YouTube is "
+                  "rate-limiting scraping right now).",
+                  file=sys.stderr,
+              )
+              return 1
+
+          if args.json:
+              json.dump(
+                  {"title": title, "url": canonical, "count": len(comments), "comments": comments},
+                  sys.stdout,
+                  ensure_ascii=False,
+                  indent=2,
+              )
+              print()
+              return 0
+
+          print(f"Title: {title}")
+          print(f"URL: {canonical}")
+          print(f"Comments fetched: {len(comments)} (sorted by popularity)")
+          print()
+          print("Comments (format: [#] (↑votes) author: text):")
+          print()
+          for i, c in enumerate(comments, 1):
+              author = f" {c['author']}" if c["author"] else ""
+              print(f"[{i}] (↑{c['votes']}){author}: {c['text']}")
+          return 0
+
+
+      if __name__ == "__main__":
+          raise SystemExit(main())
+  - path: /home/agent/.claude/skills/analyze-yt-comments/SKILL.md
+    mode: '0644'
+    content: |
+      ---
+      name: analyze-yt-comments
+      description: Analyze the YouTube comments on a video (typically about a Docker product) to surface what users liked / what stood out, potential product & blog ideas, and pain points. Use when the user provides a YouTube URL and asks to analyze, summarize, or mine its comments for feedback or product insights.
+      ---
+
+      # Analyze YouTube comments
+
+      Mine the comments on a YouTube video for actionable product signal. This skill
+      is for videos about Docker products, but works for any video.
+
+      ## When to use
+
+      Trigger when the user provides a YouTube URL (or video ID) and asks to analyze,
+      summarize, or extract insights/feedback/pain points from its comments.
+
+      ## Steps
+
+      1. **Fetch the comments** with the installed `yt-fetch` tool:
+
+         ```bash
+         yt-fetch "<youtube-url>" --limit 300
+         ```
+
+         - Default limit is 300 of the most-popular comments; raise or lower it if the
+           user asks (e.g. `--limit 500`). More comments = more signal but a longer read.
+         - The tool prints the video title, canonical URL, and numbered comments.
+         - If it errors (YouTube rate-limiting or comments disabled), report the error
+           to the user and suggest retrying or lowering `--limit`. Do not fabricate
+           comments.
+
+      2. **Analyze the fetched comments yourself.** Read strictly what is in the
+         comments — do not invent feedback that isn't there, and do not rely on outside
+         knowledge of the product. Organize findings into exactly these three buckets:
+
+         - **👍 What stood out** — what users liked or reacted positively to.
+         - **💡 Product & blog ideas** — capabilities users are asking for or curious
+           about (often phrased as "does it support X / can it do Y?"), and topics the
+           team could write about because interest is clearly there.
+         - **⚠️ Pain points** — problems, confusion, bugs, or frustrations. Tag each
+           with a rough severity (high / medium / low).
+
+      3. **Write the report** as Markdown with those three sections. For every finding:
+         - Give it a short label and a one–two sentence description.
+         - Include a few **short verbatim quotes** from the comments as evidence.
+         - Prefer specific, substantive comments over generic praise.
+         - If a bucket genuinely has nothing in it, say so rather than padding it.
+
+         Start the report with the video title, the number of comments analyzed, and a
+         2–4 sentence overall-sentiment summary.
+
+      ## Notes
+
+      - `yt-fetch` needs no API key. It scrapes comments directly (YouTube and PyPI
+        must be allowed in the sandbox network policy — the kit adds those rules).
+      - Scraping is best-effort; YouTube can rate-limit or change its endpoints.
+      - Use `yt-fetch "<url>" --json` if you want structured output to post-process.
+  install:
+  - command: python3 -m pip install --user --break-system-packages youtube-comment-downloader
+    user: '1000'
+    description: Install youtube-comment-downloader
+  - command: grep -qF '.local/bin' /etc/sandbox-persistent.sh 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> /etc/sandbox-persistent.sh
+    user: '1000'
+    description: Put ~/.local/bin on PATH
+agentContext: |
+  A `yt-fetch <youtube-url>` command is installed for scraping a video's
+  comments (no API key needed). To analyze a video's comments for product
+  insight, use the "analyze-yt-comments" skill.
