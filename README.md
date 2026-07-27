@@ -15,7 +15,11 @@ Comments are scraped directly from YouTube (no Google API key). The agent does t
 ## Quick start
 
 ```bash
-# Create a new sandbox with the kit loaded
+# Create a new sandbox pulling the kit from Docker Hub
+sbx run claude --kit docker.io/michaelirwin244/sbx-kit-youtube-analyzer:latest
+
+
+# Create a new sandbox with the kit loaded from the local filesystem (after cloning this repo)
 sbx run claude --kit ./kit
 ```
 
